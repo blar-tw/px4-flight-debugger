@@ -1,10 +1,12 @@
-# px4-ulog-mcp
+# px4-flight-debugger
 
-An MCP server that lets Claude (or any MCP client) read PX4 flight logs. Ask
-"why did that SITL flight never reach its goal?" and get the answer from the
-`.ulg` in one call instead of a hand-written pyulog script.
+Is it my planner, or is it PX4? An MCP server for people writing offboard and
+autonomy code against PX4 SITL: Claude (or any MCP client) reads the `.ulg`
+and answers "why did that flight never reach its goal?", "how far off was the
+estimate from the simulator's truth?" or "how late does PX4 follow my velocity
+commands?" in one call instead of a hand-written pyulog script.
 
-[![tests](https://github.com/blar-tw/px4-ulog-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/blar-tw/px4-ulog-mcp/actions/workflows/ci.yml)
+[![tests](https://github.com/blar-tw/px4-flight-debugger/actions/workflows/ci.yml/badge.svg)](https://github.com/blar-tw/px4-flight-debugger/actions/workflows/ci.yml)
 
 ```
 > log_summary 2026-10-20/16_21_32
@@ -66,14 +68,14 @@ local.
 Needs [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/blar-tw/px4-ulog-mcp && cd px4-ulog-mcp
+git clone https://github.com/blar-tw/px4-flight-debugger && cd px4-flight-debugger
 uv sync
 ```
 
 Register it with Claude Code (user scope, so every project sees it):
 
 ```bash
-claude mcp add px4-ulog --scope user -- uv --directory /path/to/px4-ulog-mcp run px4-ulog-mcp
+claude mcp add px4-flight-debugger --scope user -- uv --directory /path/to/px4-flight-debugger run px4-flight-debugger
 ```
 
 or add it to an MCP client's config by hand:
@@ -81,9 +83,9 @@ or add it to an MCP client's config by hand:
 ```json
 {
   "mcpServers": {
-    "px4-ulog": {
+    "px4-flight-debugger": {
       "command": "uv",
-      "args": ["--directory", "/path/to/px4-ulog-mcp", "run", "px4-ulog-mcp"],
+      "args": ["--directory", "/path/to/px4-flight-debugger", "run", "px4-flight-debugger"],
       "env": {"PX4_ULOG_DIRS": "/home/you/PX4-Autopilot/build/px4_sitl_default/rootfs/log", "PYTHONPATH": ""}
     }
   }

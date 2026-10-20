@@ -24,7 +24,7 @@ since the log started. PX4 names folders and files in UTC; `day` arguments and
 the start times in reports are local.
 """
 
-server = MCPServer('px4-ulog', instructions=INSTRUCTIONS)
+server = MCPServer('px4-flight-debugger', instructions=INSTRUCTIONS)
 
 LogRef = Annotated[str, Field(description="path, '16_21_32.ulg', '2026-10-20/16_21_32', 'latest' or 'latest-N'")]
 TFrom = Annotated[float | None, Field(description='start, s since log start')]

@@ -1572,7 +1572,7 @@ wheels = [
 ]
 
 [[package]]
-name = "px4-ulog-mcp"
+name = "px4-flight-debugger"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

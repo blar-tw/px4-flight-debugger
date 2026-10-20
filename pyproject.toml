@@ -1,7 +1,7 @@
 [project]
-name = "px4-ulog-mcp"
+name = "px4-flight-debugger"
 version = "0.1.0"
-description = "MCP server that lets an AI assistant read PX4 ULog flight logs: what happened, why it failsafed, how the estimate compares with SITL truth"
+description = "Is it my planner or PX4? MCP server that lets an AI assistant debug PX4 SITL flights from their ULog: failsafes, estimate vs simulator truth, velocity-tracking lag"
 readme = "README.md"
 authors = [
     { name = "blar-tw", email = "blar.huang@gmail.com" }
@@ -23,10 +23,10 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/blar-tw/px4-ulog-mcp"
+Repository = "https://github.com/blar-tw/px4-flight-debugger"
 
 [project.scripts]
-px4-ulog-mcp = "px4_ulog_mcp:main"
+px4-flight-debugger = "px4_flight_debugger:main"
 
 [build-system]
 requires = ["uv_build>=0.13.4,<0.14.0"]

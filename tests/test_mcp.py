@@ -6,7 +6,7 @@ import sys
 import pytest
 from mcp import Client, StdioServerParameters
 
-from px4_ulog_mcp.server import server
+from px4_flight_debugger.server import server
 from conftest import COMPASS, FIXTURES
 
 TOOLS = {'list_logs', 'log_summary', 'log_messages', 'flight_timeline', 'estimator_health',
@@ -36,7 +36,7 @@ async def test_bad_log_is_a_tool_error_not_a_crash():
 
 @pytest.mark.anyio
 async def test_stdio_subprocess():
-    params = StdioServerParameters(command=sys.executable, args=['-m', 'px4_ulog_mcp'],
+    params = StdioServerParameters(command=sys.executable, args=['-m', 'px4_flight_debugger'],
                                    env={**os.environ, 'PX4_ULOG_DIRS': FIXTURES})
     async with Client(params) as client:
         result = await client.call_tool('scan_logs', {'contains': 'compass'})
@@ -61,7 +61,7 @@ async def test_a_truncated_log_over_stdio_is_an_error_and_the_channel_survives(t
     (day / '10_00_00.ulg').write_bytes(data[:len(data) // 2])   # cut off mid-data
     (day / '10_05_00.ulg').write_bytes(data[:3000])              # cut off in the definitions
     (day / '10_10_00.ulg').write_bytes(b'')
-    params = StdioServerParameters(command=sys.executable, args=['-m', 'px4_ulog_mcp'],
+    params = StdioServerParameters(command=sys.executable, args=['-m', 'px4_flight_debugger'],
                                    env={**os.environ, 'PX4_ULOG_DIRS': str(tmp_path)})
     async with Client(params) as client:
         half = await client.call_tool('log_summary', {'log': '10_00_00'})

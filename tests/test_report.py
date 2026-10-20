@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 
 import conftest
-from px4_ulog_mcp import logs, report, server
-from px4_ulog_mcp.names import ARM_REASON
+from px4_flight_debugger import logs, report, server
+from px4_flight_debugger.names import ARM_REASON
 from conftest import COMPASS, DRIFT
 
 
@@ -180,7 +180,7 @@ def test_unreadable_files_are_errors_and_do_not_stop_a_scan(tmp_path, monkeypatc
 
 
 def test_reason_names_cover_failsafe_and_show_unknown_numbers():
-    from px4_ulog_mcp.names import name
+    from px4_flight_debugger.names import name
     assert name(ARM_REASON, 14) == 'failsafe' and name(ARM_REASON, 99) == '99'
 
 
