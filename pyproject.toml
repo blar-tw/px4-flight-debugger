@@ -1,0 +1,43 @@
+[project]
+name = "px4-ulog-mcp"
+version = "0.1.0"
+description = "MCP server that lets an AI assistant read PX4 ULog flight logs: what happened, why it failsafed, how the estimate compares with SITL truth"
+readme = "README.md"
+authors = [
+    { name = "blar-tw", email = "blar.huang@gmail.com" }
+]
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["px4", "ulog", "mcp", "drone", "flight-log", "sitl", "model-context-protocol"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Intended Audience :: Science/Research",
+]
+dependencies = [
+    "matplotlib>=3.10.9",
+    "mcp>=2.3.0",
+    "numpy>=2.2.6",
+    "pyulog>=1.2",
+]
+
+[project.urls]
+Repository = "https://github.com/blar-tw/px4-ulog-mcp"
+
+[project.scripts]
+px4-ulog-mcp = "px4_ulog_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.13.4,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# PX4 users usually have ROS 2 sourced; its PYTHONPATH brings pytest plugins that need ROS's own deps
+addopts = "-p no:launch_testing -p no:launch_ros -p no:ament_xmllint -p no:ament_copyright -p no:ament_pep257 -p no:ament_flake8 -p no:ament_lint"
