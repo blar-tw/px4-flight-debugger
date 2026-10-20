@@ -2,6 +2,7 @@
 Each test is a question that once took a hand-written pyulog script."""
 
 import re
+from datetime import timedelta
 
 import numpy as np
 import pytest
@@ -36,10 +37,10 @@ def test_resolve_latest_minus_one_and_unknown():
 
 def test_find_at_maps_local_wall_clock_to_the_running_log():
     start = logs.start_time(logs.resolve(DRIFT)).astimezone()
-    assert logs.find_at(start.strftime('%Y-%m-%d %H:%M:%S')).endswith('17_06_45.ulg')
-    later = start.replace(second=start.second + 30 if start.second < 30 else start.second)
-    assert logs.find_at(later.strftime('%Y-%m-%d %H:%M:%S')).endswith('17_06_45.ulg')
-    assert logs.find_at('2026-10-20 00:00') is None
+    for later in (0, 30):
+        when = (start + timedelta(seconds=later)).strftime('%Y-%m-%d %H:%M:%S')
+        assert logs.find_at(when).endswith('17_06_45.ulg')
+    assert logs.find_at((start + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M')) is None
 
 
 # --- what happened ---

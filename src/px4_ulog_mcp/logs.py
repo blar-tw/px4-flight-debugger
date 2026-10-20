@@ -72,14 +72,14 @@ def resolve(ref):
 
 def find_at(when):
     """The log that was running at local time `when` ('HH:MM[:SS]' today or
-    'YYYY-MM-DD HH:MM[:SS]'), with its duration from a light parse."""
-    now = datetime.now().astimezone()
-    fmt = '%Y-%m-%d %H:%M:%S' if '-' in when else '%H:%M:%S'
-    text = when if when.count(':') == 2 else when + ':00'
-    t = datetime.strptime(text, fmt)
-    if '-' not in when:
-        t = t.replace(year=now.year, month=now.month, day=now.day)
-    t = t.replace(tzinfo=now.tzinfo).astimezone(timezone.utc)
+    'YYYY-MM-DD HH:MM[:SS]')."""
+    text = when.strip()
+    if '-' not in text:
+        text = datetime.now().strftime('%Y-%m-%d ') + text
+    if text.count(':') == 1:
+        text += ':00'
+    # a naive datetime's astimezone() reads it as local time, with that date's DST
+    t = datetime.strptime(text, '%Y-%m-%d %H:%M:%S').astimezone(timezone.utc)
     for path in reversed(all_logs()):
         start = start_time(path)
         if start <= t:
