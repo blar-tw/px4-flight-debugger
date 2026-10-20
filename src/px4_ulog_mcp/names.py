@@ -18,6 +18,7 @@ ARM_REASON = {
     0: 'transition to standby', 1: 'RC', 2: 'RC switch', 3: 'internal command',
     4: 'external command', 5: 'mission start', 6: 'landing', 7: 'auto preflight disarming',
     8: 'kill switch', 9: 'lockdown', 10: 'failure detector', 11: 'shutdown', 12: 'unit test',
+    13: 'RC button', 14: 'failsafe',
 }
 
 VEHICLE_CMD = {

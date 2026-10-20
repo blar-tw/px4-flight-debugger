@@ -7,6 +7,7 @@ from datetime import timedelta
 import numpy as np
 import pytest
 
+import conftest
 from px4_ulog_mcp import logs, report, server
 from px4_ulog_mcp.names import ARM_REASON
 from conftest import COMPASS, DRIFT
@@ -142,3 +143,83 @@ def test_px4_version_and_reason_names():
     assert report.px4_version({'ver_sw_release': 0x010E0400}) == 'v1.14.4 dev'
     assert report.px4_version({'ver_sw_release': 0x010F00FF}) == 'v1.15.0'
     assert ARM_REASON[6] == 'landing'        # not the stale 'safety button' from VehicleStatus.msg
+
+
+# --- found in review: robustness ---
+
+def fresh(ref):
+    """A private parse of a fixture, safe to modify."""
+    from pyulog import ULog
+    path = logs.resolve(ref)
+    return path, ULog(path)
+
+
+def test_logs_without_dead_reckoning_still_report():
+    # GIVEN a log like PX4 v1.13's, whose vehicle_local_position has no dead_reckoning
+    path, u = fresh(COMPASS)
+    del report.topic(u, 'vehicle_local_position')['dead_reckoning']
+    # THEN every report that reads it still works
+    assert 'horizontal position invalid 17.5-50.0s' in report.summary(u, path)
+    assert 'dead_reckoning' not in report.timeline(u, path, 200)
+    assert 'dead reckoning' not in report.estimator_report(u, path)
+
+
+def test_unreadable_files_are_errors_and_do_not_stop_a_scan(tmp_path, monkeypatch):
+    day = tmp_path / '2026-10-21'
+    day.mkdir()
+    good = open(logs.resolve(DRIFT), 'rb').read()
+    (day / '10_00_00.ulg').write_bytes(good[:3000])       # cut off inside the definitions
+    (day / '10_05_00.ulg').write_bytes(b'')
+    monkeypatch.setenv('PX4_ULOG_DIRS', f'{tmp_path}:{conftest.FIXTURES}')
+    with pytest.raises(Exception, match='not a readable ULog'):
+        server.log_summary('10_05_00')
+    out = server.scan_logs(limit=10)
+    assert '10_05_00.ulg  skipped' in out          # empty: rejected, with the reason
+    assert '10_00_00.ulg  2026' in out             # truncated: pyulog reads what is there
+    assert '17_06_45.ulg' in out
+
+
+def test_reason_names_cover_failsafe_and_show_unknown_numbers():
+    from px4_ulog_mcp.names import name
+    assert name(ARM_REASON, 14) == 'failsafe' and name(ARM_REASON, 99) == '99'
+
+
+def test_height_and_distance_count_from_arming():
+    out = server.log_summary(DRIFT)
+    assert 1.8 < number(r'up to ([\d.]+) m higher', out) < 2.3
+    assert 13 < number(r'([\d.]+) m away', out) < 15
+
+
+def test_truth_is_compared_from_where_the_drone_spawned():
+    path, u = fresh(DRIFT)
+    before = report.truth_report(u, path)
+    gt = report.topic(u, 'vehicle_local_position_groundtruth')
+    gt['x'] = gt['x'] + 5.0                                  # spawned 5 m north, 3 m east
+    gt['y'] = gt['y'] + 3.0
+    after = report.truth_report(u, path)
+    assert 'spawned at world north +5.00, east +3.00 m' in after
+    pick = lambda text: re.search(r'in the air.*', text).group(0)
+    assert pick(after) == pick(before)
+    assert 'local origin +0.27 m north' in before or 'local origin -0.27 m north' in before
+
+
+def test_velocity_tracking_flags_a_bad_fit_and_a_flight_without_velocity_control():
+    path, u = fresh(DRIFT)
+    lp = report.topic(u, 'vehicle_local_position')
+    lp['vx'] = np.random.default_rng(1).normal(0, 1, len(lp['vx'])).astype(lp['vx'].dtype)
+    assert 'POOR FIT' in report.tracking_report(u, path)
+    assert 'no offboard horizontal velocity setpoints' in server.velocity_tracking(COMPASS)
+
+
+def test_bad_inputs_say_what_is_wrong():
+    with pytest.raises(Exception, match='not one of'):
+        server.log_messages(COMPASS, min_level='warn')
+    with pytest.raises(Exception, match='not a topic name'):
+        server.topic_data('sensor_mag[x]', COMPASS)
+    assert logs.find_at('2026-10-20T10:07:00') is None or logs.find_at('2026-10-20T10:07:00').endswith('.ulg')
+
+
+def test_dedup_keeps_different_numbers_apart():
+    msgs = [(1.0, 'WARNING', 'console', 'Compass 0 bad'), (2.0, 'WARNING', 'console', 'Compass 1 bad'),
+            (3.0, 'WARNING', 'console', 'Compass 0 bad')]
+    assert [(text, n) for _t, _l, text, n, _last in report.dedup(msgs)] == [('Compass 0 bad', 2), ('Compass 1 bad', 1)]

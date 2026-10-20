@@ -9,8 +9,8 @@ import re
 import numpy as np
 
 from . import logs
-from .names import (ARM_REASON, ARMED, ARMING_STATE, CMD_RESULT, NAV_STATE, VEHICLE_CMD,
-                    name, severity)
+from .names import (ARM_REASON, ARMED, ARMING_STATE, CMD_RESULT, LEVELS, NAV_STATE,
+                    VEHICLE_CMD, name, severity)
 
 
 # --- access helpers ---
@@ -22,12 +22,30 @@ def topic(u, topic_name, multi=0):
     return None
 
 
+def split_instance(ref):
+    """'sensor_mag[1]' -> ('sensor_mag', 1)."""
+    m = re.fullmatch(r'([a-z0-9_]+)(?:\[(\d+)\])?', ref.strip())
+    if not m:
+        raise ValueError(f"'{ref}' is not a topic name (e.g. 'sensor_mag' or 'sensor_mag[1]')")
+    return m.group(1), int(m.group(2) or 0)
+
+
+def flag(data, field):
+    """A boolean field, or None when this PX4 version does not log it
+    (dead_reckoning, for one, only exists from v1.14)."""
+    return data[field].astype(bool) if field in data else None
+
+
 def secs(u, ts):
     return (np.asarray(ts, dtype=float) - u.start_timestamp) / 1e6
 
 
 def duration(u):
-    return (u.last_timestamp - u.start_timestamp) / 1e6
+    """Up to the last vehicle_local_position/vehicle_status sample, so the figure does
+    not depend on which other topics a tool happened to parse."""
+    ends = [d.data['timestamp'][-1] for d in u.data_list
+            if d.name in ('vehicle_local_position', 'vehicle_status') and len(d.data['timestamp'])]
+    return ((max(ends) if ends else u.last_timestamp) - u.start_timestamp) / 1e6
 
 
 def intervals(t, mask):
@@ -80,6 +98,8 @@ def messages(u, min_level='WARNING', contains='', t_from=None, t_to=None):
     out = [(secs(u, m.timestamp).item(), m.log_level_str(), 'console', m.message.strip())
            for m in u.logged_messages]
     out += [(secs(u, ts).item(), lvl, 'event', text) for ts, lvl, text in logs.events(u)]
+    if min_level.upper() not in LEVELS:
+        raise ValueError(f"min_level '{min_level}' is not one of {' '.join(LEVELS)}")
     worst = severity(min_level)
     pattern = re.compile(re.escape(contains), re.I) if contains else None
     out = [m for m in out if severity(m[1]) <= worst
@@ -92,7 +112,7 @@ def dedup(msgs):
     """Collapse repeats: (first t, level, text, count, last t)."""
     seen = {}
     for t, lvl, _src, text in msgs:
-        key = re.sub(r'\d+(\.\d+)?', '#', text)
+        key = (lvl, text)
         if key in seen:
             first, l0, txt, n, _ = seen[key]
             seen[key] = (first, l0, txt, n + 1, t)
@@ -132,8 +152,9 @@ def mode_changes(u):
             for tt, k in changes(t, key)]
 
 
-def flight_facts(u):
-    """Takeoff/landing times, height gained, distance, peak speed."""
+def flight_facts(u, armed_at):
+    """Takeoff/landing times; height, distance and peak speed counted from arming
+    (before that the estimate is still settling: EKF2 resets it at the first GPS fix)."""
     facts = []
     land = topic(u, 'vehicle_land_detected')
     if land is not None:
@@ -142,13 +163,13 @@ def flight_facts(u):
         if air:
             facts.append('in the air ' + spans(air))
     lp = topic(u, 'vehicle_local_position')
-    if lp is not None and len(lp['z']):
-        z0 = lp['z'][0]
-        steps = np.hypot(np.diff(lp['x']), np.diff(lp['y']))
-        facts.append(f"highest {z0 - lp['z'].min():.2f} m above the log's first estimate, "
-                     f"{np.hypot(lp['x'] - lp['x'][0], lp['y'] - lp['y'][0]).max():.1f} m from start, "
-                     f"path {steps[steps < 1.0].sum():.1f} m, "
-                     f"peak speed {np.hypot(lp['vx'], lp['vy']).max():.1f} m/s")
+    if lp is not None and armed_at is not None:
+        k = min(np.searchsorted(secs(u, lp['timestamp']), armed_at), len(lp['z']) - 1)
+        x, y, z = lp['x'][k:], lp['y'][k:], lp['z'][k:]
+        steps = np.hypot(np.diff(x), np.diff(y))
+        facts.append(f"from where it armed, by the estimate: up to {z[0] - z.min():.2f} m higher, "
+                     f"{np.hypot(x - x[0], y - y[0]).max():.1f} m away, path {steps[steps < 1.0].sum():.1f} m, "
+                     f"peak speed {np.hypot(lp['vx'][k:], lp['vy'][k:]).max():.1f} m/s")
     return facts
 
 
@@ -162,14 +183,13 @@ def summary(u, path):
         for a, b in armed:
             i = np.searchsorted(t, a)
             j = min(np.searchsorted(t, b), len(t) - 1)
-            start = f"{a:.1f}s ({ARM_REASON.get(int(st['latest_arming_reason'][i]), '?')})"
+            start = f"{a:.1f}s ({name(ARM_REASON, st['latest_arming_reason'][i])})"
             if st['arming_state'][j] == ARMED:       # the log stopped first
                 why.append(f'{start} -> still armed when the log ends')
             else:
-                why.append(f"{start} -> {b:.1f}s "
-                           f"({ARM_REASON.get(int(st['latest_disarming_reason'][j]), '?')})")
+                why.append(f"{start} -> {b:.1f}s ({name(ARM_REASON, st['latest_disarming_reason'][j])})")
         lines.append('armed: ' + ('; '.join(why) if why else 'never'))
-    lines += flight_facts(u)
+    lines += flight_facts(u, armed[0][0] if armed else None)
 
     modes = mode_changes(u)
     if modes:
@@ -190,10 +210,11 @@ def summary(u, path):
         for a, b in armed:
             during |= (t >= a) & (t <= b)
         bad = intervals(t, during & ~lp['xy_valid'].astype(bool))
-        dr = intervals(t, during & lp['dead_reckoning'].astype(bool))
+        dead = flag(lp, 'dead_reckoning')
+        dr = intervals(t, during & dead) if dead is not None else []
         if bad or dr:
-            lines.append(f'estimator while armed: horizontal position invalid {spans(bad)}; '
-                         f'dead reckoning {spans(dr)}')
+            lines.append(f'estimator while armed: horizontal position invalid {spans(bad)}'
+                         + (f'; dead reckoning {spans(dr)}' if dead is not None else ''))
 
     notable = dedup(messages(u, 'WARNING'))
     if notable:
@@ -236,7 +257,8 @@ def timeline(u, path, limit):
     if lp is not None:
         t = secs(u, lp['timestamp'])
         for field in ('xy_valid', 'z_valid', 'dead_reckoning'):
-            for tt, val in changes(t, lp[field].astype(bool))[1:]:
+            values = flag(lp, field)
+            for tt, val in (changes(t, values)[1:] if values is not None else []):
                 rows.append((tt, f'estimator {field} -> {bool(val)}'))
     for t, lvl, text, n, last in dedup(messages(u, 'WARNING')):
         rows.append((t, f'{lvl}: {text}' + (f'  (x{n} until {last:.1f}s)' if n > 1 else '')))
@@ -256,10 +278,14 @@ def estimator_report(u, path):
     if lp is not None:
         t = secs(u, lp['timestamp'])
         for field in ('xy_valid', 'z_valid', 'v_xy_valid', 'v_z_valid'):
-            lines.append(f'{field} false: {spans(intervals(t, ~lp[field].astype(bool)))}')
-        lines.append(f"dead reckoning: {spans(intervals(t, lp['dead_reckoning'].astype(bool)))}")
+            values = flag(lp, field)
+            if values is not None:
+                lines.append(f'{field} false: {spans(intervals(t, ~values))}')
+        dead = flag(lp, 'dead_reckoning')
+        if dead is not None:
+            lines.append(f'dead reckoning: {spans(intervals(t, dead))}')
         for field in ('xy_reset_counter', 'z_reset_counter', 'heading_reset_counter'):
-            resets = [f'{tt:.1f}s' for tt, _ in changes(t, lp[field])[1:]]
+            resets = [f'{tt:.1f}s' for tt, _ in changes(t, lp[field])[1:]] if field in lp else []
             if resets:
                 lines.append(f"{field.replace('_counter', '')}s at {', '.join(resets)}")
     flags = topic(u, 'estimator_status_flags')
@@ -272,7 +298,8 @@ def estimator_report(u, path):
             for tt, val in changes(t, v.astype(bool))[1:]:
                 (faults if k.startswith('fs_') else on).append((tt, f"{k[3:]} {'on' if val else 'off'}"))
         lines.append('fusion/status changes: '
-                     + ('; '.join(f'{tt:.1f}s {what}' for tt, what in sorted(on)[:40]) or 'none'))
+                     + ('; '.join(f'{tt:.1f}s {what}' for tt, what in sorted(on)[:40]) or 'none')
+                     + (f' ... {len(on) - 40} more (topic_data estimator_status_flags)' if len(on) > 40 else ''))
         lines.append('faults: ' + ('; '.join(f'{tt:.1f}s {what}' for tt, what in sorted(faults)) or 'none'))
     ratios = topic(u, 'estimator_innovation_test_ratios')
     if ratios is not None:
@@ -297,13 +324,19 @@ def truth_report(u, path):
         return header(u, path) + '\nno vehicle_local_position_groundtruth: only SITL logs carry the truth'
     t = secs(u, est['timestamp'])
     tg = secs(u, gt['timestamp'])
-    g = {k: np.interp(t, tg, gt[k]) for k in ('x', 'y', 'z')}
+    # truth is the simulator's world frame; PX4's local frame starts where the drone
+    # spawned, so compare against the truth relative to the spawn point
+    spawn = {k: gt[k][0] for k in ('x', 'y', 'z')}
+    g = {k: np.interp(t, tg, gt[k]) - spawn[k] for k in ('x', 'y', 'z')}
     dn, de = est['x'] - g['x'], est['y'] - g['y']
     dup = -(est['z'] - g['z'])                       # estimated height minus true height
     horiz = np.hypot(dn, de)
     lifted = np.flatnonzero(-g['z'] > 0.3)
     lines = [header(u, path),
-             'error = estimate - truth; "height" positive means PX4 thinks it is higher than it is']
+             'error = estimate - truth, truth taken relative to where the drone spawned; '
+             '"height" positive means PX4 thinks it is higher than it is']
+    if np.hypot(spawn['x'], spawn['y']) > 0.05:
+        lines.append(f"spawned at world north {spawn['x']:+.2f}, east {spawn['y']:+.2f} m")
 
     def block(label, m):
         if not m.any():
@@ -319,11 +352,18 @@ def truth_report(u, path):
         lines.append(f'liftoff (truth above 0.3 m) at {t[k]:.1f}s')
     else:
         block('whole log (never left the ground)', np.ones(len(t), dtype=bool))
-    jump = np.abs(np.diff(np.c_[dn, de, dup], axis=0)).max(axis=1)
-    big = np.flatnonzero(jump > 0.3)
-    if len(big):
-        lines.append('estimate jumped against the truth (>0.3 m in one sample) at '
-                     + ', '.join(f'{t[i + 1]:.1f}s ({jump[i]:.2f} m)' for i in big[:8]))
+    origin = _origin_offset(est, gt)
+    if origin is not None:
+        lines.append(f'PX4 put its local origin {origin[0]:+.2f} m north, {origin[1]:+.2f} m east of the '
+                     "simulator's (ref_lat/ref_lon): a horizontal error that is there from the first GPS fix")
+    armed = armed_intervals(u)
+    if armed:                                       # EKF2 always resets at its first GPS fix; skip that
+        after = t[1:] >= armed[0][0]
+        jump = np.abs(np.diff(np.c_[dn, de, dup], axis=0)).max(axis=1)
+        big = np.flatnonzero(after & (jump > 0.3))
+        if len(big):
+            lines.append('while armed, the estimate jumped against the truth (>0.3 m in one sample) at '
+                         + ', '.join(f'{t[i + 1]:.1f}s ({jump[i]:.2f} m)' for i in big[:8]))
     att, att_gt = topic(u, 'vehicle_attitude'), topic(u, 'vehicle_attitude_groundtruth')
     if att is not None and att_gt is not None:
         ta, tag = secs(u, att['timestamp']), secs(u, att_gt['timestamp'])
@@ -332,6 +372,20 @@ def truth_report(u, path):
         err = np.degrees(np.angle(np.exp(1j * (yaw - yaw_gt))))
         lines.append(f'yaw error: mean {np.abs(err).mean():.1f} deg, max {np.abs(err).max():.1f} deg')
     return '\n'.join(lines)
+
+
+def _origin_offset(est, gt):
+    """(north, east) metres from the simulator's reference to PX4's, once PX4 has one."""
+    if not all(k in d for d in (est, gt) for k in ('ref_lat', 'ref_lon')):
+        return None
+    ok = np.isfinite(est['ref_lat']) & np.isfinite(est['ref_lon'])
+    if not ok.any():
+        return None
+    lat, lon = est['ref_lat'][ok][-1], est['ref_lon'][ok][-1]
+    r = 6371000.0
+    north = np.radians(lat - gt['ref_lat'][0]) * r
+    east = np.radians(lon - gt['ref_lon'][0]) * r * np.cos(np.radians(lat))
+    return float(north), float(east)
 
 
 def _yaw(att):
@@ -360,19 +414,24 @@ def fit_lag(cmd, vel, dt):
 
 
 def tracking_report(u, path):
-    sp, lp = topic(u, 'trajectory_setpoint'), topic(u, 'vehicle_local_position')
+    sp, lp, st = (topic(u, 'trajectory_setpoint'), topic(u, 'vehicle_local_position'),
+                  topic(u, 'vehicle_status'))
     head = header(u, path)
     if sp is None or lp is None:
         return head + '\nneeds trajectory_setpoint and vehicle_local_position'
-    ts = secs(u, sp['timestamp'])
-    vel_cmd = np.c_[sp['velocity[0]'], sp['velocity[1]']]
-    pos_cmd = np.c_[sp['position[0]'], sp['position[1]']]
+    order = np.argsort(sp['timestamp'], kind='stable')   # stamped by the sender, not always in order
+    ts = secs(u, sp['timestamp'][order])
+    vel_cmd = np.c_[sp['velocity[0]'], sp['velocity[1]']][order]
+    pos_cmd = np.c_[sp['position[0]'], sp['position[1]']][order]
     # PX4 offboard flies a velocity setpoint when the position is NaN; a position
     # setpoint with untouched (zero) velocity fields is not a velocity command
     vel_mode = np.isfinite(vel_cmd).all(axis=1) & ~np.isfinite(pos_cmd).any(axis=1)
+    if st is not None:                               # and only while PX4 is in offboard
+        tst = secs(u, st['timestamp'])
+        nav = st['nav_state'][np.clip(np.searchsorted(tst, ts, 'right') - 1, 0, len(tst) - 1)]
+        vel_mode &= nav == 14
     if vel_mode.sum() < 10:
-        return head + '\nno horizontal velocity setpoints (position NaN, velocity set) in this log'
-    # the longest stretch of velocity setpoints with no gap over 0.5 s
+        return head + '\nno offboard horizontal velocity setpoints (position NaN, velocity set) in this log'
     idx = np.flatnonzero(vel_mode)
     cuts = np.flatnonzero(np.diff(ts[idx]) > 0.5) + 1
     seg = max(np.split(idx, cuts), key=lambda s: ts[s[-1]] - ts[s[0]])
@@ -385,15 +444,18 @@ def tracking_report(u, path):
     vel = np.c_[np.interp(grid, tl, lp['vx']), np.interp(grid, tl, lp['vy'])]
     tau, dead, rmse = fit_lag(cmd, vel, dt)
     rate = len(seg) / max(ts[seg[-1]] - ts[seg[0]], 1e-3)
+    peak_cmd = np.hypot(*cmd.T).max()
     lines = [head,
              f'velocity control {grid[0]:.1f}-{grid[-1]:.1f}s ({len(grid) * dt:.1f} s), '
              f'setpoints logged at {rate:.0f} Hz',
              f'best fit: first-order lag tau {tau:.2f} s after {dead:.2f} s dead time '
              f'(reaction time ~{tau + dead:.2f} s), rmse {rmse:.3f} m/s',
-             f'commanded speed peak {np.hypot(*cmd.T).max():.2f} m/s, '
-             f'measured peak {np.hypot(*vel.T).max():.2f} m/s',
-             'this is PX4 from receiving the setpoint; an offboard planner also sees its own '
-             'transport and scheduling delay (fit its log for the end-to-end figure)']
+             f'commanded speed peak {peak_cmd:.2f} m/s, measured peak {np.hypot(*vel.T).max():.2f} m/s',
+             "times run from the setpoint's own timestamp (set by the sender); an offboard planner "
+             'also sees transport and scheduling delay, fit its own log for the end-to-end figure']
+    if tau >= 1.99 or dead >= 0.74 or rmse > 0.25 * max(peak_cmd, 0.1):
+        lines.append('POOR FIT: this does not look like a lagged velocity follower (fit at its search '
+                     'limit or rmse large against the command); check the mode timeline and estimator')
     if rate < 15:
         lines.append(f'the logger thinned trajectory_setpoint to {rate:.0f} Hz; dead time is good to about '
                      f'{1 / rate:.1f} s')
@@ -430,8 +492,8 @@ def topics_report(u, path):
 
 
 def topic_data_report(u, path, topic_name, fields, t_from, t_to, points):
-    base, _, inst = topic_name.partition('[')
-    data = topic(u, base, int(inst.rstrip(']')) if inst else 0)
+    base, inst = split_instance(topic_name)
+    data = topic(u, base, inst)
     if data is None:
         near = sorted({d.name for d in u.data_list if base.split('_')[0] in d.name})[:10]
         raise ValueError(f"no topic '{topic_name}' in this log" + (f"; similar: {', '.join(near)}" if near else ''))
@@ -475,7 +537,7 @@ def scan_line(path, contains):
     fs = [t for t, _n, _a, f in mode_changes(u) if f]
     msgs = messages(u, 'WARNING', contains)
     first = f'{msgs[0][0]:.1f}s {msgs[0][3]}' if msgs else ''
-    line = (f"{os.path.basename(path)}  {logs.local(logs.start_time(path))[11:19]}  "
+    line = (f"{os.path.basename(path)}  {logs.local(logs.start_time(path))[:19]}  "
             f"{duration(u):5.1f}s  armed {sum(b - a for a, b in armed):5.1f}s  "
             f"{'FAILSAFE ' + format(fs[0], '.1f') + 's' if fs else 'no failsafe':16s} "
             f"{len(msgs):3d} warnings  {first[:90]}")
@@ -492,9 +554,8 @@ def plot_png(u, path, series, t_from, t_to):
     fig, axes = plt.subplots(len(series), 1, figsize=(9, 2.2 * len(series)), sharex=True, squeeze=False)
     for ax, s in zip(axes[:, 0], series):
         for one in s.split('+'):
-            tname, _, field = one.strip().rpartition('.')
-            base, _, inst = tname.partition('[')
-            data = topic(u, base, int(inst.rstrip(']')) if inst else 0)
+            tname, _, field = one.strip().partition('.')
+            data = topic(u, *split_instance(tname)) if tname else None
             if data is None or field not in data:
                 raise ValueError(f"no '{one.strip()}' in this log (use topic.field, e.g. vehicle_local_position.z)")
             t = secs(u, data['timestamp'])

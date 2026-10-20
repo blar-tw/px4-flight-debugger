@@ -1,10 +1,12 @@
 """Finding logs, naming their start time, and keeping a few parsed ones around."""
 
+import contextlib
 import functools
 import glob
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 
 from pyulog import ULog
@@ -73,7 +75,7 @@ def resolve(ref):
 def find_at(when):
     """The log that was running at local time `when` ('HH:MM[:SS]' today or
     'YYYY-MM-DD HH:MM[:SS]')."""
-    text = when.strip()
+    text = when.strip().replace('T', ' ')
     if '-' not in text:
         text = datetime.now().strftime('%Y-%m-%d ') + text
     if text.count(':') == 1:
@@ -96,7 +98,12 @@ def load(path, topics=None):
 
 @functools.lru_cache(maxsize=12)
 def _load(path, _mtime, topics):
-    return ULog(path, list(topics) if topics else None, disable_str_exceptions=True)
+    # pyulog prints warnings to stdout, which is the MCP channel on stdio
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            return ULog(path, list(topics) if topics else None, disable_str_exceptions=True)
+        except Exception as exc:   # empty, truncated, still being written, not a ULog at all
+            raise ValueError(f'{os.path.basename(path)}: not a readable ULog ({exc})') from exc
 
 
 def events(ulog):
@@ -105,10 +112,11 @@ def events(ulog):
     downloads."""
     parser = PX4Events()
     parser.set_default_json_definitions_cb(_local_event_definitions)
-    try:
-        return parser.get_logged_events(ulog)
-    except Exception:          # undecodable metadata: report the log without events
-        return []
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            return parser.get_logged_events(ulog)
+        except Exception:      # undecodable metadata: report the log without events
+            return []
 
 
 def _local_event_definitions(already_loaded):

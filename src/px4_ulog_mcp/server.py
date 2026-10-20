@@ -20,7 +20,8 @@ topic_data and plot_series.
 A log is named by path, file name ('16_21_32.ulg'), date/name
 ('2026-10-20/16_21_32'), 'latest' or 'latest-N'. list_logs with `at` finds the
 log that was running at a local wall-clock time. Times in reports are seconds
-since the log started.
+since the log started. PX4 names folders and files in UTC; `day` arguments and
+the start times in reports are local.
 """
 
 server = MCPServer('px4-ulog', instructions=INSTRUCTIONS)
@@ -44,16 +45,16 @@ def tool(fn):
 
 
 def _open(log, topics=None):
-    # vehicle_status is small and keeps the log's end time right in a filtered parse
+    # every report's header needs the log's span, taken from these two topics
     path = logs.resolve(log)
-    return path, logs.load(path, (*topics, 'vehicle_status') if topics else None)
+    return path, logs.load(path, (*topics, 'vehicle_status', 'vehicle_local_position') if topics else None)
 
 
 @tool
 def list_logs(
     at: Annotated[str, Field(description="local time 'HH:MM[:SS]' (today) or 'YYYY-MM-DD HH:MM' to find the log running then")] = '',
     day: Annotated[str, Field(description="only logs started on this local date, 'YYYY-MM-DD'")] = '',
-    limit: int = 20,
+    limit: Annotated[int, Field(ge=1)] = 20,
 ) -> str:
     """List flight logs newest first with their local start time, or find the one
     that covers a given wall-clock time."""
@@ -171,7 +172,7 @@ def topic_data(
 def scan_logs(
     day: Annotated[str, Field(description="local date 'YYYY-MM-DD'; empty = the latest `limit` logs")] = '',
     contains: Annotated[str, Field(description='only count warnings containing this text')] = '',
-    limit: int = 40,
+    limit: Annotated[int, Field(ge=1, description='at most this many of the newest logs')] = 40,
 ) -> str:
     """One line per log: start time, duration, time armed, first failsafe, warning
     count and the first warning. For questions like 'which flights today lost the
@@ -179,7 +180,14 @@ def scan_logs(
     paths = [p for p in logs.all_logs() if not day or logs.local(logs.start_time(p)).startswith(day)]
     total = len(paths)
     paths = paths[-limit:]
-    rows = [line for line, n in (report.scan_line(p, contains) for p in paths) if n or not contains]
+    rows = []
+    for p in paths:
+        try:
+            line, n = report.scan_line(p, contains)
+        except ValueError as exc:                    # one bad file must not hide the rest
+            line, n = f'{os.path.basename(p)}  skipped: {exc}', 1
+        if n or not contains:
+            rows.append(line)
     head = (f'{len(paths)} of {total} logs' + (f' on {day}' if day else '') + ' scanned'
             + (f"; {len(rows)} with warnings containing '{contains}'" if contains else ''))
     return '\n'.join([head] + rows)
