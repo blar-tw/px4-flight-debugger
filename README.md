@@ -9,17 +9,20 @@ An MCP server that lets Claude (or any MCP client) read PX4 flight logs. Ask
 ```
 > log_summary 2026-10-20/16_21_32
 
+log 2026-10-20/16_21_32.ulg  started 2026-10-20 09:21:32 PDT, 50.9 s, 10.2 MB
 PX4 v1.14.4 dev on PX4_SITL
 armed: 12.6s (internal command) -> 49.9s (landing)
 in the air 14.4-47.9s
+[...]
 modes: 0.0 AUTO_LOITER disarmed -> 12.6 OFFBOARD armed -> 17.6 ALTCTL FAILSAFE -> 49.9 OFFBOARD disarmed
 failsafe: first at 17.6s
 estimator while armed: horizontal position invalid 17.5-50.0s; dead reckoning 13.5-50.0s
 warnings and errors (6 distinct):
     13.8s WARNING  [health_and_arming_checks] Preflight Fail: No valid data from Compass 0  (x3, last 22.6s)
     17.5s WARNING  [mc_pos_control] Failsafe: blind land  (x15, last 46.1s)
+    [...]
     17.6s WARNING  Failsafe activated, triggering fallback to altitude control
-    ...
+    [...]
 ```
 
 That flight came from an obstacle-avoidance batch in Gazebo where, in two runs
@@ -54,7 +57,9 @@ read and reason about.
 
 All read-only. A log is named by path, file name (`16_21_32.ulg`), date/name
 (`2026-10-20/16_21_32`), `latest` or `latest-N`. Times are seconds since the
-log started; the local wall-clock start is in every header.
+log started; the local wall-clock start is in every header. PX4 names log
+folders and files in UTC, while `day` arguments and printed start times are
+local.
 
 ## Install
 
@@ -100,22 +105,35 @@ sourced ROS 2 environment from leaking its packages into the server.
   from commander's `arm_disarm_reason_t`, not the `ARM_DISARM_REASON_*`
   constants in `VehicleStatus.msg`, which are out of date (6 is "landing", not
   "safety button").
-- `velocity_tracking` only counts setpoints with position NaN and velocity set,
-  which is what PX4 offboard flies as a velocity command. A position setpoint
-  whose velocity fields were simply left at zero is not one; counting those
-  halved the fitted lag before this rule.
+- `velocity_tracking` only counts setpoints with position NaN and velocity set
+  while PX4 is in offboard, which is what it flies as a velocity command. A
+  position setpoint whose velocity fields were simply left at zero is not one;
+  counting those halved the fitted lag before this rule. It says so when the
+  fit does not look like a lagged velocity follower.
+- `estimate_vs_truth` takes the truth relative to where the drone spawned (the
+  simulator's world frame need not start at PX4's local origin) and reports
+  separately how far PX4 placed its local origin from the simulator's.
+- pyulog prints warnings on stdout, which is the protocol channel on stdio;
+  they are sent to stderr instead. An unreadable file is a tool error, and
+  `scan_logs` skips it with the reason.
 
 ## Things the logs showed while building it
 
 - **SITL logs carry the ground truth.** `vehicle_local_position_groundtruth`
   and `vehicle_attitude_groundtruth` are logged next to the estimate, so
-  estimate-vs-truth needs no Gazebo bridge or extra recorder. In the flights
-  above the estimate settled 0.3 m off in height while still on the ground and
-  0.5 m off in the air.
-- **PX4's own lag and the planner's.** From the log, PX4 follows a velocity
-  setpoint with a 0.50 s lag after 0.15 s of dead time. The planner that sent
-  those setpoints measured 0.60 s plus 0.15 s from its own side: transport and
-  scheduling add roughly 0.1 s, and that is the figure a planner should budget.
+  estimate-vs-truth needs no Gazebo bridge or extra recorder. Across 97 SITL
+  flights here, the height estimate had settled between 1.17 m below and 1.22 m
+  above the truth while the drone still sat on the ground (either sign, more
+  than 0.3 m in 60 of them), and the offset carried into the air. Horizontally,
+  most of the error is where PX4 put its local origin at the first GPS fix: in
+  17_06_45 the origin sits 0.35 m from the spawn point and the estimate is off
+  by 0.39 m.
+- **PX4's own lag and the planner's.** Over 87 flights with a clean fit, PX4
+  followed an offboard velocity setpoint like a first-order lag of 0.45 s
+  (0.40-0.55) after 0.20 s of dead time. For 17_06_45 the log says 0.65 s in
+  total, while the planner that sent the setpoints measured about 0.75 s from
+  its own side: transport and scheduling add roughly 0.1 s, and the end-to-end
+  figure is the one a planner should budget.
 - **A message mismatch, visible as an arming reason.** The planner arms through
   a `VehicleCommand` with `from_external` set, yet the log says "internal
   command". Its `px4_msgs` (main) has `source_component` as `uint16` where
@@ -125,7 +143,9 @@ sourced ROS 2 environment from leaking its packages into the server.
 
 - Built and tested against PX4 v1.14 SITL logs. Other versions parse, but
   enum values they added show up as numbers.
-- `estimate_vs_truth` needs a SITL log; real flights have no truth topic.
+- `estimate_vs_truth` needs a SITL log; real flights have no truth topic. It
+  takes the first truth sample as the spawn point, so the drone should be at
+  rest when logging starts (PX4 starts logging at boot by default).
 - PX4's default logging profile thins `trajectory_setpoint` to about 5 Hz, so
   the fitted dead time is only good to about 0.2 s.
 
